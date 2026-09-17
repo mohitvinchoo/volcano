@@ -152,30 +152,37 @@ func (gp *Action) preemptJobInDomains(ssn *framework.Session, stmt *framework.St
 		if len(domainBundles) == 0 {
 			continue
 		}
-		domainIdle := utils.SumIdleAndReleasing(domainNodes)
+		available := utils.SumIdleAndReleasing(domainNodes)
 		selectedVictims := make([]*api.TaskInfo, 0)
 		for _, bundle := range domainBundles {
-			selectedVictims = append(selectedVictims, bundle.Tasks...)
-			available := domainIdle.Clone()
-			available.Add(utils.SumResreq(selectedVictims))
-			if !jobNeed.LessEqual(available, api.Zero) {
-				continue
-			}
+			for i, task := range bundle.Tasks {
+				selectedVictims = append(selectedVictims, task)
+				available.Add(task.Resreq)
+				// SAFE tasks can be consumed individually; WHOLE bundles must remain intact.
+				if bundle.Type == utils.BundleWhole && i < len(bundle.Tasks)-1 {
+					continue
+				}
+				if !jobNeed.LessEqual(available, api.Zero) {
+					continue
+				}
 
-			attemptVictims := append([]*api.TaskInfo(nil), selectedVictims...)
+				// Resource totals are only a lower bound: if placement fails, try
+				// additional victims in the existing bundle and task order.
+				attemptVictims := append([]*api.TaskInfo(nil), selectedVictims...)
 
-			jobHN := ssn.HyperNodes[domain]
-			if jobHN == nil {
-				jobHN = ssn.HyperNodes[framework.ClusterTopHyperNode]
+				jobHN := ssn.HyperNodes[domain]
+				if jobHN == nil {
+					jobHN = ssn.HyperNodes[framework.ClusterTopHyperNode]
+				}
+				plan, subJobHyperNodes, ok := utils.BuildNominationPlanInDomain(ssn, queue, preemptorJob, jobHN, attemptVictims, utils.ReasonGangPreempt, gp.enablePredicateErrorCache)
+				if !ok {
+					continue
+				}
+				if err := stmt.RecoverOperations(plan); err != nil {
+					continue
+				}
+				return subJobHyperNodes
 			}
-			plan, subJobHyperNodes, ok := utils.BuildNominationPlanInDomain(ssn, queue, preemptorJob, jobHN, attemptVictims, utils.ReasonGangPreempt, gp.enablePredicateErrorCache)
-			if !ok {
-				continue
-			}
-			if err := stmt.RecoverOperations(plan); err != nil {
-				continue
-			}
-			return subJobHyperNodes
 		}
 	}
 	return nil
